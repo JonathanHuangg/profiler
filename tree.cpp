@@ -2,6 +2,13 @@
 #include <new> 
 #include <cstddef> 
 
+// if compiler oks it, bring it into namespace, else use the fallback
+#ifndef __cpp_lib_hardware_interference_size
+    constexpr std::size_t CACHE_LINE = std::hardware_destructive_interference_size;
+#else 
+    constexpr std::size_t CACHE_LINE = 64;
+#endif
+
 template <typename T>
 /*
 BST:
@@ -9,15 +16,40 @@ left < right
 */
 class BST {
     private:
+        // alignas adds padding to fit block size
+        struct alignas(CACHE_LINE) FriendlyNode {
+            T data; 
+            FriendlyNode *left, *right;
+
+            // total bytes - size of T - 2 pointers = padding size
+
+            /*
+            this does not account for internal alignment padding:
+            std::byte pad[hardware_destructive_interference_size - sizeof(T) - 2 * sizeof(void*)]
+            */
+            FriendlyNode(T val): data(val), left(nullptr), right(nullptr) {}
+        }
+
+        struct UnfriendlyNode {
+            T data;
+            UnfriendlyNode *left, *right; 
+
+            // get the size at compiletime. 
+            static constexpr std::size_t base_size = sizeof(T) + (2 * sizeof(void*));
+            
+            const static constexpr std::size_t padding_size = (base_size >= CACHE_LINE) ? 1 : (CACHE_LINE - base_size + 1);
+
+            std::byte spill_padding[padding_size];
+            UnfriendlyNode(T val): data(val), left(nullptr), right(nullptr)
+        }
         struct Node {
             T data; // T sized data
             Node* left; // 8 byte pointers
             Node* right; // 8 byte pointers
-            bool block_friendly; // 1 byte
 
             // constructor is empty because everything is done in initializer
             // putting it inside brackets is assignment and inefficeint because data memory is first created and then copied in
-            Node(T val, bool friendly) : data(val), left(nullptr), right(nullptr), block_friendly(friendly) {}
+            Node(T val, bool friendly) : data(val), left(nullptr), right(nullptr) {}
         };
 
         Node* root;
@@ -34,7 +66,7 @@ class BST {
         }
     public:
         // initialize it as null_ptr so there's not a need for dummy node
-        BST(bool friendly) : root(nullptr), block_friendly(friendly){}
+        BST(bool friendly) : root(nullptr){}
         ~BST() {
             clear(root);
         }
@@ -97,4 +129,4 @@ Red Black Tree:
 4) all paths from node -> NIL descendents is same number of black nodes
 5) longest path is no more than 2x length of shortest (all black vs red/black interleaving)
 
-*/
+*/;
