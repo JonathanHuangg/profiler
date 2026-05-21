@@ -1,5 +1,4 @@
 /*
-
 For virtual functions, the compiler converts the name of the virtual function 
 into an index into a parge table of pointers to functions
 
@@ -13,6 +12,4 @@ virtual pointer - every object instance has this in its first member variable
 
 unique_ptr - not a class like std::vector. It is a resource manager/owner wrapper. 
 When a unique pointer goes out of scope, the allocated object is deleted. 
-
-
 */
