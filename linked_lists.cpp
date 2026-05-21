@@ -1,4 +1,6 @@
 /*
+g++ -O3 -std=c++20 linked_lists.cpp -o linked_list
+
 No heap allocation becasue of memory fragmentation and cache misses
 
 lvalue is  on the heap. they have an address so you use &
@@ -9,7 +11,10 @@ rvalue is pointer stealing (move)
 
 rule of 5: destructor, copy constructor, copy assignment operator, move constructor, move assignment operator
 */
-
+#include <iostream>
+#include <string>
+#include <sstream>
+#include <forward_list>
 template <typename T> 
 class SinglyLinkedList_bare {
     private:
@@ -18,7 +23,7 @@ class SinglyLinkedList_bare {
             T data; 
             Node* next; 
             
-            // using template U makes compiler to a type deduction at runtime to see lvalue or rvalue
+            // using template U makes compiler to a type deduction at compiletime to see lvalue or rvalue
             template <typename U>
             // passing l values does a deep copy, passing r value is a move operation
             // Node(T val, Node* nxt = nullptr) : data(std::move(val)), next(nxt) {}
@@ -95,6 +100,7 @@ class SinglyLinkedList_bare {
         5) new Node() is called and because it is rvalue, std::forward casts ravlue std::string into rvalue reference &&std::string&&
         6) Node constructor runs
         */
+        template <typename U>
         void push_front(U&& val) {
             emplace_front(std::forward<U>(val));
         }
@@ -105,13 +111,25 @@ class SinglyLinkedList_bare {
             }
 
             Node* old_head = head;
-            head = head.next;
+            head = head->next;
             delete old_head;
-            --list_size--;
+            --list_size;
         }
 
         std::size_t size() const {return list_size;}
         bool empty() const {return list_size == 0;}
+
+        std::string read_list() {
+            std::stringstream ss;
+            Node* probe = head;
+            while (probe != nullptr) {
+                ss << probe->data; 
+                ss << " ";
+                probe = probe->next;
+            }
+
+            return ss.str();
+        }
 };
 
 // destructor
@@ -172,7 +190,7 @@ class SinglyLinkedList_norm {
                 clear();
 
                 if (other.head == nullptr) {
-                    return;
+                    return *this;
                 }
                 head = new Node(other.head->data);
                 Node* this_probe = head; 
@@ -212,12 +230,61 @@ class SinglyLinkedList_norm {
             head = new Node(val, head);
             ++list_size;
         }
+
+        std::string read_list() {
+            std::stringstream ss;
+            Node* probe = head;
+            while (probe != nullptr) {
+                ss << probe->data; 
+                ss << " "; 
+                probe = probe->next;
+            }
+
+            return ss.str();
+        }
 };
 
 class DoublyLinkedList {
-    NULL; 
-}
+    public:
+        DoublyLinkedList() = default;
+};
 
 class CircularlyLinkedList {
-    NULL; 
+    public:
+        CircularlyLinkedList() = default;
+};
+
+int main() {
+
+    std::cout << "LINKEDLIST TEST SUITE \n \n";
+
+    std::cout << "Basic Tests: \n\n";
+    std::cout << "Testing bare_list \n";
+    SinglyLinkedList_bare<std::string> bare_list;
+    std::string a = "basic";
+    std::string b = "test";
+    std::string c = "passes";
+    bare_list.push_front(c);
+    bare_list.push_front(b);
+    bare_list.emplace_front("basic");
+    std::cout << "Basic Correctness Check for bare_list: " << bare_list.read_list() << "\n \n";
+
+    std::cout << "Testing norm_list \n";
+    SinglyLinkedList_norm<std::string> norm_listA;
+    norm_listA.push_front(c);
+    norm_listA.push_front(b);
+    norm_listA.push_front(a);
+    std::cout << "Basic Correctness Check for norm_list: " << norm_listA.read_list() << "\n \n";
+
+    std::cout << "Testing STL std::forward_list \n";
+    std::forward_list<std::string> forward_list;
+    forward_list.push_front(c);
+    forward_list.push_front(b);
+    forward_list.push_front("basic");
+    std::stringstream forward_list_ss;
+    for (const auto& item : forward_list) {
+        forward_list_ss << item << " ";
+    }
+
+    std::cout << "Basic Correctness Check for STL forward_list: " << forward_list_ss.str() << "\n\n";
 }
