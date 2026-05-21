@@ -114,6 +114,11 @@ class SinglyLinkedList_bare {
         bool empty() const {return list_size == 0;}
 };
 
+// destructor
+// copy constructor
+// copy assignment
+// move constructor
+// move assignment
 template <typename T> 
 class SinglyLinkedList_norm {
     private:
@@ -137,10 +142,60 @@ class SinglyLinkedList_norm {
 
         ~SinglyLinkedList_norm() {clear();}
 
-        // get rid of copy semantics
-        SinglyLinkedList_norm(const SinglyLinkedList_norm&) = delete;
-        SinglyLinkedList_norm& operator = (const SinglyLinkedList_norm&) = delete;
-        
+        // copy constructor. called when new object is being created
+        // SinglyLinkedList_norm ListA;
+        // SinglyLinkedList_norm ListB(ListA)
+        // SinglyLinkedList_norm ListC = ListA;
+        SinglyLinkedList_norm(const SinglyLinkedList_norm& other) : head(nullptr), list_size(0) {
+            if (other.head == nullptr) {
+                return;
+            }
+
+            head = new Node(other.head->data);
+            Node* this_probe = head;
+            Node* other_probe = other.head->next;
+
+            while (other_probe != nullptr) {
+                this_probe->next = new Node(other_probe->data);
+                other_probe = other_probe->next;
+                this_probe = this_probe->next;
+            }
+            list_size = other.list_size;
+        }
+
+        // copy assigment operator -> overwriting
+        // SinglyLinkedList_norm ListA;
+        // SinglyLinkedList_norm ListB;
+        // ListB = ListA;
+        SinglyLinkedList_norm& operator= (const SinglyLinkedList_norm& other) {
+            if (this != &other) {
+                clear();
+
+                if (other.head == nullptr) {
+                    return;
+                }
+                head = new Node(other.head->data);
+                Node* this_probe = head; 
+                Node* other_probe = other.head->next;
+
+                while (other_probe != nullptr) {
+                    this_probe->next = new Node(other_probe->data);
+                    other_probe = other_probe->next;
+                    this_probe = this_probe->next; 
+                }
+
+                list_size = other.list_size;
+            }
+
+            return *this;
+        }
+
+        // move constructor -> steals the pointers
+        SinglyLinkedList_norm(SinglyLinkedList_norm&& other) noexcept : head(other.head), list_size(other.list_size) {
+            other.head = nullptr;
+            other.list_size = 0;
+        }       
+
         void clear() {
             Node* probe = head;
 
@@ -153,11 +208,11 @@ class SinglyLinkedList_norm {
             list_size = 0;
         }
 
-        // move semantis
-        
-
-
-}
+        void push_front(T val) {
+            head = new Node(val, head);
+            ++list_size;
+        }
+};
 
 class DoublyLinkedList {
     NULL; 
