@@ -63,7 +63,42 @@ Adding virtual functions, the compiler injects a `vptr` into the object memory. 
 Virtual functions are used to enable runtime polymorphism. You can pass a base class type into a system and have it execute the overridden implementation of the derived class.
 
 * **Static Binding:** Looks at the static type of the pointer, calculates the memory offset, and emits a direct hard-coded `CALL` instruction.
-* **Dynamic Binding:** The CPU does a chain of pointer dereferences to find the correct instruction address.
+```cpp
+class CPUKernel {
+    public:
+        void execute() {/* ... */}
+};
+
+int main() {
+    CPUKernel kernel;
+    kernel.execute(); // hardcoded static jump
+}
+```
+
+* **Dynamic Binding:** The CPU does a chain of pointer dereferences to find the correct instruction address. At compile time, compiler only knows base but object in memory is derived. Must use vtable indirection at runtime. 
+
+```cpp
+class Kernel {
+    public:
+        virtual void execute() {/* ... */}
+};
+
+class GPUKernel : public Kernel {
+    public:
+        void execute() override {/* ... */}
+};
+
+void run(Kernel* k) {
+    k->execute(); // need to read vptr, offsets into vtable, read address, then indirect call
+}
+
+int main() {
+    GPUKernel gpuK;
+    run(&gpuK);
+}
+
+```
+
 
 #### Vtable and Vptr
 * **Vtable:** Compiler generates a static array of raw function pointers for that specific class. The array is constructed at compile time and baked into read-only data (`.rodata`). One `vtable` per class.
@@ -76,6 +111,77 @@ Virtual functions are used to enable runtime polymorphism. You can pass a base c
 4. Indirect call -> CPU jumps to the resolved address, passing `basePtr` as the hidden `this` pointer.
 
 The pointer jumps cause a performance penalty due to the extra memory loads and branch prediction misses in the CPU pipeline.
+
+```cpp
+
+
+// bad architecture
+class BadElementScaler {
+    public:
+        virtual float scaleElement(float val) = 0;
+        virtual ~BadElementScaler() = default;
+};
+
+class CPUElementScaler : BadElementScaler {
+    float scaleElement(float val) override {
+        return val * 2.0; 
+    }
+}; 
+
+void runBadPipeline(BadElementScaler* scaler, float*matrix, size_t size) {
+    for (int i = 0; i < size; i++) {
+
+        // bad because you are doing the lookup size times
+        matrix[i] = scaler->scaleElement(matrix[i]);
+    }
+}
+
+
+```
+Calling virtual function scaler->scaleElement()
+
+1) Memory read 1 - CPU reads object's vptr from memory
+2) Memory read 2 - CPU uses vptr to find vtable, add offset of routeMatrix, and read actual function pointer
+3) Stall - CPU cannot know target address until reads complete. 
+4) Pipeline flush - if branch predictor guesses wrong, must flush. 
+```cpp
+class MatrixScaler {
+public:
+    // Pure virtual function: sets up our architectural interface boundary.
+    virtual void scaleData(float* matrix, size_t size) = 0;
+    virtual ~MatrixScaler() = default;
+};
+class CPUMatrixScaler : public MatrixScaler {
+    public:
+        void scaleData(float* matrix, size_t size) override {
+            for (size_t i = 0; i < size; ++i) {
+                matrix[i] = matrix[i] * 2.0f;
+            }
+        }
+};
+
+void runGoodPipeline(MatrixScaler*scaler, float*matrix, size_t size) {
+    scaler->scaleData(matrix, size);
+}
+```
+
+More on this:
+
+At compilation, you have something like this:
+
+```
+[.rodata segment]
+vtable for GPUDispatcher: [&GPUDispatcher::routeMatrix]
+vtable for CPUDispatcher: [&CPUDispatcher::routeMatrix]
+
+```
+
+When you create an object, it is something like this:
+```
+[Memory address 0x1000 (GPUDispatcher instance)]
+Bytes 0-7: vptr (points straight to vtable for GPUDispatcher)
+Bytes 8-15: any other variables
+```
 
 ---
 
@@ -129,6 +235,67 @@ A unique pointer's destructor looks something like this:
 }
 ```
 
+```cpp
+
+class MatrixBuffer {
+    private:
+        float* data;
+    public:
+        MatrixBuffer(size_t size) {
+            data = new float[size];
+        }
+
+        ~MatrixBuffer() {
+            delete[] data;
+        }
+};
+
+void runPipeline() {
+    MatrixBuffer buffer(10000);
+} // scope will end and destructor will be called
+```
+
+Abstract Types: define an interface without specifying the implementation. Done via virtual functions.
+
+You only write custom RAII class when interfacing with raw resources. Examples include:
+
+1) Operating System handles (File descriptors and sockets) -> opening a network socket on POSIX, you just get an int. FDs are indexes into a private, per-process array maintained by the File Descriptor Table. The table points to kernel's internal file structs. 
+
+2) Hardware and Driver contexts: hipstream_t or cudaStream_t is usually a typedef for a pointer to an opaque struct. The pointer tracks hardware queues. Losing the pointer, GPU driver still thinks the queue is active and reserved for the process. Need to call hipStreamDestroy(stream)
+
+3) Library Mutexes and Synchronization Primitives.
+pthread_mutex_t is a raw data structure containing atomic integers used for spinlocks and other stuff. It's raw because the state changes by odifying bits. std::lock_guard does not own memory of the mutex. It owns the state of it. 
+
+Litmus Test:
+1) Identity - is it represented as a primitive (int, void* uintptr_t)
+2) State - Does using it change state outside of program's stack/heap memory
+3) Consequence - if variable vanishes, will a leak occur outside of application heap memory. 
+
+
+```cpp
+class DeviceStream {
+    private:
+        hipstream_t stream;
+    public:
+        DeviceStream() {
+            hipStreamCreate(&stream); // acquire resource
+        }
+
+        ~DeviceStream() {
+            hipStreamDestroy(stream);
+        }
+
+        hipstream_t get() {return stream;}
+};
+
+void runKernel() {
+    DeviceStream myStream;
+
+    if (some_error) {
+        return; // destructor implicitly called
+    }
+}
+```
 ---
 
 ## Chapter 3. Modularity
@@ -159,3 +326,202 @@ This is critical for hardware alignment. For example:
 ```cpp
 static_assert(alignof(MyStruct) == 32, "Struct breaks AVX alignment requirements");
 ```
+
+### Classes
+Concrete Types - its representation is known to the compiler at instantiation. Because the compiler knows the exact memory footprint, it can be allocated on the stack.
+
+Value semantics - when you initialize or assign a concrete object. You are copying the underlying bytes.
+
+Constructors
+Default Constructor - constructor invoked w/o arguments. The compiler falls back on this for implicit initializations. 
+
+Containers and Reallocation Penalties
+std::vector is concrete - lives on the stack. But it manages a dynamically sized array on the heap. Just like in other languages, when you hit capacity, new memory block, and copy each one over. You can use reserve() if you know how much you need to pre-allocate. 
+
+### Ownership, Copying, Move Semantics
+1) Danger of Naked Pointers. If a function allocates a massive array on heap and returns a float*, the compiler won't know what to delete. Solution: return a std::unique_ptr<float[]>. This stack object owns the heap pointer so the destructor will be called out of scope. 
+
+```cpp
+float* allocateTensorRaw(size_t size) {
+    return new float[size];
+}
+void processPipelineRaw() {
+    float* data = allocateTensorRaw(1024);
+
+    if (data[0] < 0.0f) {
+        return; // memory leak here
+    }
+    delete[] data;
+}
+```
+
+Do this instead:
+
+```cpp
+#include <memory>
+
+std::unique_ptr<float[]> allocateTensorModern(size_t size) {
+    return std::make_unique<float[]>(size);
+}
+
+void processPipelineModern() {
+    std::unique_ptr<float[]> data = allocateTensorModern(1024);
+    if (data[0] < 0.0f) {
+        return; // this is safe now
+    }
+}
+```
+2) Copy Semantics 
+
+With a custom Vector class, doing something like v2 = v1 is a shallow copy and copies the 8-byte pointer. When they go out of scope, destructors will try to delete the same address causing a double free segfault. In this case, you need to write a custom copy constructor that does a deep copy.
+
+3) Move semantics
+Although deep copies are safe, they are not performant. If you are returning a 4GB tensor, you don't want to have another buffer. You want to just pass it to the caller. You can make a move constructor. 
+
+```cpp
+class TensorBuffer {
+    float* data;
+    size_t size; 
+
+    public: 
+        // this is a move constructor
+        TensorBuffer(TensorBuffer&& other) {
+            this->data = other.data;
+            this->size = other.size;
+
+            other.data = nullptr;
+            other.size = 0;
+        }
+};
+```
+
+Implementing the rule of 5: destructor, copy, copy assignment, move, move assignment
+```cpp
+class Vector {
+    private:
+        double*elem;
+        int size;
+    
+    public:
+        Vector() : elem(nullptr), size(0) {}
+        Vector(int s) : elem{new double[s]}, size(s) {}
+
+        // destructor
+        ~Vector() {
+            delete[] elem;
+        }
+
+        // copy constructor
+        // Vector() -> I am building new vector from scratch
+        // const Vector& other take in a const reference
+        Vector(const Vector& other) : elem{new double[other.size]}, size{other.size} {
+            for (int i = 0; i < other.size; i++) {
+                elem[i] = other.elem[i];
+            }
+        } 
+
+        // copy assignment. replace state of one with another
+        // operator= -> this object already exists. I am replacing internal state. 
+        // const Vector& other -> I am taking other as a reference
+        // The return type is Vector& 
+        Vector& operator= (const Vector& other) {
+            if (this == &other) {
+                return *this; 
+            }
+
+            double* arr = new double[other.size];
+            for (int i = 0; i < other.size; ++i) {
+                arr[i] = other.elem[i];
+            }
+
+            delete[] elem;
+            elem = arr;
+            size = other.size;
+
+            return *this;
+        }
+
+        // move 
+        // Vector() -> building a brand new object. Take other as a reference
+        Vector(Vector&& other) : elem(other.elem), size(other.size) {
+            other.elem = nullptr;
+            other.size = 0; 
+        }
+        
+        // Move assignment
+        // replacing operator= -> same as above
+        // Vector&& other -> You are taking a rvalue so it is dying 
+        Vector& operator=(Vector&& other) {
+            if (this == &other) {
+                return *this; 
+            }
+
+            delete[] elem;
+            elem = other.elem;
+            size = other.size;
+
+            other.elem = nullptr;
+            other.size = 0;
+            return *this; 
+        }
+};
+```
+
+However normally, always design classes by the rule of zero. Design them so they never manage resources directly. Instead of double*, use std::vector<double> or std::unique_ptr; Those types already have built in rule of 5. 
+
+```cpp
+#include <vector>
+#include <string>
+
+class Layer_Weights {
+    public:
+        std::string layer_name;
+        std::vector<float> weights;
+};
+
+void run() {
+    Layer_Weights layer;
+    layer.layer_name = "dense_1";
+    layer.weights.resize(100);
+
+    // this will work because compiler uses the move constructor from std::vector
+    Layer_Weights layer2 = std::move(layer);
+}
+```
+### Functors (Function Objects)
+Normal functions cannot hold state. If you have a vector of 1 million floats and want to use std::count_if to count the number of numbers < 42, how would you do this?
+
+A functor overloads the operator() and allows you to construct an object with a state then call the object like a function.
+
+```cpp
+template<typename T>
+class Less_than {
+    const T val; // have this hold the 42
+
+    public:
+        Less_than(const T& v) : val(v) {}
+
+        bool operator()(const T& x) const {
+            return x < val;
+        }
+};
+
+void runPipeline(std::vector<int>& data) {
+    // create the object
+    Less_than<int> check_42(42);
+
+    bool result = check_42(10);
+}
+```
+
+### Lambdas
+```cpp
+int threshold = 42; 
+auto check_val = [&](int a) {return a < threshold; };
+```
+
+[] is the capture list - defines member variables of the hidden class. [&] means capture everything in the current scope by reference. [=] means copy.
+
+() - parameters
+{} - the code
+
