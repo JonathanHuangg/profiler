@@ -493,6 +493,9 @@ Normal functions cannot hold state. If you have a vector of 1 million floats and
 
 A functor overloads the operator() and allows you to construct an object with a state then call the object like a function.
 
+note: operator() literally just means like when you pass in (something here).
+
+and so operator= means you are overriding the =. 
 ```cpp
 template<typename T>
 class Less_than {
@@ -524,4 +527,191 @@ auto check_val = [&](int a) {return a < threshold; };
 
 () - parameters
 {} - the code
+The issue in the previous response was that the outer Markdown wrapper used triple backticks (`````), which collided with the C++ code blocks inside it and prematurely closed the formatting, breaking the UI's copy utility.
 
+Here is the exact text wrapped in a 4-backtick master block so the copy button works correctly:
+
+```markdown
+### Variadic Templates
+Sometimes you don't know how many arguments a function will receive or what hardware software runs on. 
+
+Variadic templates accept an unknown number and type of arguments. 
+
+Type Aliases solve the problem of compiling the same code on different hardware where bytes of types change. 
+
+Sometimes you want to have a for-loop that iterates over different types. This won't work normally because for loops only work over homogeneous data. Variadic templates use recursion to process arguments at compile time:
+
+```cpp
+void f() {
+    // base case
+}
+
+template<typename T, typename... Tail>
+void f(T head, Tail... tail) {
+    G(head); // process the head value
+    f(tail...); // recursively call f with the rest of the tail values
+}
+```
+
+Therefore, if you run something like:
+```cpp
+f(1, 2.3, "hello_world");
+```
+
+the compiler automatically generates the chain of strictly typed hardcoded functions:
+
+```cpp
+void f_generated_1(int head, double tail1, const char* tail2) {
+    G(1);
+    f_generated2(2.3, "hello_world");
+}
+```
+
+The compiler then goes on to build all of these functions recursively and finally it links:
+```cpp
+f_generated_base();
+```
+to the empty `void f() {}` so the recursion terminates. 
+
+### Type Aliases
+
+Use the `using` keyword. 
+
+```cpp
+// this:
+std::unordered_map<std::string, std::vector<float*>> mem_pool; 
+
+// vs:
+using DeviceBufferMap = std::unordered_map<std::string, std::vector<float*>>;
+
+DeviceBufferMap mem_pool;
+``` 
+
+Fun fact: C uses `typedef` but `typedef` can't handle template parameters. `using` does. 
+
+`size_t` is great because it works as an alias to select the optimal byte width for the host system. 
+
+```cpp
+unsigned int matrix_bytes = width * height * sizeof(float);
+
+// vs
+// this is more robust
+size_t matrix_bytes = width * height * sizeof(float);
+```
+
+### Containers
+
+#### 1) Sequence Containers
+`std::array`
+- Size is known at compile time and put on the stack.
+- No overhead.
+- In assembly, it is literally just a base + offset.
+- If too large, will cause stack overflow errors.
+- Used for fixed-size lookup tables, storing top N levels, mapping enum states.
+
+`std::vector`
+- 3 pointers living on the stack (`begin`, `end`, `capacity_end`) = 24 bytes total. Actual data lives on the heap.
+- Almost always need to call `reserve(N)` before filling.
+
+To do something like `vec[2] = 5`:
+1. Read the start pointer from the stack.
+2. Jump to the address on the heap.
+3. Add the offset.
+4. Write the value.
+
+The data on the heap is contiguous. 
+
+`push_back()` -> Creates a temporary object on the stack, gives it to the vector, copies it into the heap buffer, and destroys the temporary object.
+
+`emplace_back()` -> Passes raw constructor arguments into the vector and the object is constructed directly inside the heap buffer. Skips the temporary object.
+
+#### 2) Sequence Containers
+`std::list` (doubly linked) and `std::forward_list` (singly linked)
+- Has 2 or 1 pointers (previous/next) and the payload.
+- Every time you traverse, you jump to a random heap address, guaranteeing an L1/L2 cache miss on almost every node. 
+- If you need something like this, build an intrusive list, an array-backed node pool, or use `std::vector`. 
+
+Array-Backed Node Pool - Allocate a massive `std::vector` of nodes and use 32-bit ints to link. 
+
+```cpp
+struct PoolNode {
+    double payload;
+    int32_t next_idx;
+    int32_t prev_idx;
+};
+
+class NodePool {
+    std::vector<PoolNode> memory_pool;
+    int32_t free_head;
+    int32_t active_head;
+
+    // custom logic
+};
+```
+
+Because all nodes live inside the vector, there are fewer cache misses. `int32_t` instead of 64-bit pointers means more nodes fit in a cache line. 
+
+Intrusive List
+Normally, containers wrap data in their own structure which requires memory allocation and pointer indirection. In intrusive lists, the data is the node.
+
+```cpp
+struct IntrusiveNode {
+    IntrusiveNode* prev;
+    IntrusiveNode* next;
+};
+
+// entry automatically takes prev and next
+struct Entry : public IntrusiveNode {
+    double price;
+    int size; 
+};
+
+class IntrusiveList {
+    IntrusiveNode* head;
+    IntrusiveNode* tail; 
+};
+```
+
+#### 3) Tree-Based Containers
+`std::map` and `std::set`
+- These are implemented with Red-Black Trees. Every node has left, right, parent, color, and payload. 
+- O(log n) for search, insert, and delete.
+- If you already have a `std::vector`, do not just insert elements one by one. Sort the vector, then pass `begin()` and `end()` into the `std::set`. It will construct in O(N) time:
+```cpp
+std::vector<int> data = {};
+std::sort(data.begin(), data.end());
+
+std::set<int> my_set(data.begin(), data.end());
+```
+
+- Usually replace with sorted `std::vector`s using binary search if not written to and read frequently.
+```cpp
+std::vector<std::pair<int, double>> flat_map;
+std::sort(flat_map.begin(), flat_map.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+// binary search
+auto it = std::lower_bound(flat_map.begin(), flat_map.end(), target_key, [](const auto& pair, int key) { return pair.first < key; });
+
+// lower_bound is just a binary search.
+```
+
+Compared to a tree, there is less memory overhead. Also, the prefetcher is able to get data much more efficiently. 
+
+However, this only works if you don't modify frequently. Needing to add an element in the middle is O(n). In those cases, use a flat map implementation instead.
+
+#### 4) Hash Tables
+`std::unordered_map` & `std::unordered_set`
+- An array of buckets. Each bucket has pointers to singly linked lists.
+- Use `reserve()` or else the container will guess a starting capacity. As you insert, it may rehash, which is performance-heavy. 
+- Separate chaining causes a cache miss on bucket lookup and another cache miss for the linked list. Usually, open-addressing hashmaps like `absl::flat_hash_map` are preferred instead.
+
+#### 5) Container Adapters
+`std::queue` and `std::stack`
+- Wraps a `std::deque` by default. 
+- Works well.
+
+`std::priority_queue`
+- Wraps a `std::vector` and maintains a max-heap structure using `std::make_heap`, `std::push_heap`, and `std::pop_heap`.
+- Used for event scheduling where you always need the highest/lowest priority elements.
+
+```
