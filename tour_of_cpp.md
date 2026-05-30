@@ -714,4 +714,324 @@ However, this only works if you don't modify frequently. Needing to add an eleme
 - Wraps a `std::vector` and maintains a max-heap structure using `std::make_heap`, `std::push_heap`, and `std::pop_heap`.
 - Used for event scheduling where you always need the highest/lowest priority elements.
 
+
+### std:: Algorithms
+
+#### 1) Numeric Reduction Algorithms
+
+##### std::accumulate
+
+Used for serial folding/summation. Evaluates left to right.
+
+```cpp
+#include <numeric>
+#include <vector>
+
+std::vector<double> prices = {10.5, 11.2, 10.0};
+double sum = std::accumulate(prices.begin(), prices.end(), 0.0); // use float so no arithmetic truncation. Else, it will resolve to an int at every step.
 ```
+
+Under the hood, it is a simple for loop. 
+
+The sum is deterministic but not associative due to rounding errors.
+
+##### std::reduce
+
+Out of order folding. Designed for multithreading and vectorization via execution policies. 
+
+```cpp
+#include <numeric>
+#include <vector>
+#include <execution>
+
+std::vector<double> numbers = {1.5, -0.2, 3.4, -1.1};
+
+double total = std::reduce(std::execution::par_unseq, numbers.begin(), numbers.end(), 0.0); // execution policy is std::execution::par_unseq in this case
+``` 
+
+Reduce operations must be commutative and associative. 
+
+Floating point addition is commutative -> for any 2 numbers, a + b = b + a. However, it is not associative -> after grouping, there is a rounding step on intermediate results that may/may not be thrown out if numbers were in a different order. 
+
+###### std::execution
+Namespace that contains execution policy tasks. Used in algorithms like `std::reduce`, `std::for_each`, `std::transform`. It tells the compiler structural guarantees of lambda/functor which allows optimization like concurrency and vectorization. 
+
+1) `std::execution::seq` - strict sequential operations. Use this when operations depend on order or you don't need multithreading. 
+
+2) `std::execution::par` - par is parallel. Used across multiple threads and each thread may grab chunks out of order. Within each thread, operations are done sequentially. In the cases of shared state, must use mutexes or atomics. 
+
+3) `std::execution::unseq` - executes on a single thread but allows vectorization. Operations may be interleaved on the instruction level. Cannot use any synchronizations because if a lane waits, the entire core is deadlocked.
+
+4) `std::execution::par_unseq` - allows multithreading and vectorization. No data races and no locks, mutexes, or blocking calls. 
+
+In cases of multithreading: `std::execution::par` and `std::execution::par_unseq`.
+
+These libraries do not call `std::thread` because spawning OS threads is too slow. They rely on optimized thread pools and work-stealing schedulers. GCC links with Intel TBB (Thread Building Blocks) or OpenMP.
+
+They also do work-stealing:
+1) Recursive divide into an optimal chunk size.
+2) Queued -> chunks are put into a lock-free queue for each cpu core.
+3) If core i finishes its queue, steal work from the bottom of another core.
+4) As chunks finish, intermediate results are joined via tree reduction until the total is finished.
+
+In cases of vectorization: `std::execution::unseq`, `std::execution::par_unseq`.
+
+Compiler auto-vectorizer generates SIMD instructions. Instead of something like:
+
+```asm
+ADD x[0], y[0]
+ADD x[1], y[1]
+```
+
+Compiler does:
+```asm
+VAPPD zmm0, zmm1, zmm2 // which adds 8 doubles in a single clock cycle
+```
+
+For vectorization, you need to promise that loop iterations do not depend on each other. The `unseq` tag is that promise. 
+
+
+Also, using `std::execution::par_unseq` with `std::for_each` and multiple threads writing to nearby atomic variables will invalidate each other's L1 cache lines (false sharing).
+
+What does this actually mean:
+When CPU reads/writes from RAM, you fetch cache blocks from RAM to L1 cache. Through MESI, if 2 cores read the same block, it is in a SHARED state. If a core writes, it broadcasts the invalidate to all other cores. All other cores must cache miss on the next fetch and wait for the writing core to flush back to L3 shared cache or RAM. 
+
+False Sharing - multiple threads operating on different cores modify independent variables that are on the same cache line. 
+
+Solution: memory alignment. Force variables into separate cache lines. 
+
+```cpp
+#include <new>
+struct alignas(std::hardware_destructive_interference_size) PaddedCounter {
+    std::atomic<int> value;
+};
+
+// using the PaddedCounter struct allows for every value to live on a different block
+std::vector<PaddedCounter> counters(4);
+```
+
+##### std::inner_product
+
+It is the dot product of 2 ranges. This has been replaced by `transform_reduce`.
+
+```cpp
+#include <numeric>
+#include <vector>
+
+std::vector<double> v1 = {1.0, 2.0, 3.0};
+std::vector<double> v2 = {4.0, 5.0, 6.0};
+
+double dot = std::inner_product(v1.begin(), v1.end(), v2.begin(), 0.0);
+```
+
+Under the hood, it looks like this:
+
+```cpp
+template<class InputIt1, class InputIt2, class T>
+T inner_product(InputIt1 first1, InputIt1 last1, InputIt2 first2, T value) {
+    while (first1 != last1) {
+        value = std::move(value) + (*first1) * (*first2);
+        ++first1;
+        ++first2;
+    }
+
+    return value; 
+}
+```
+The problem is that it has an execution order left to right which blocks parallelization from the loop itself.
+
+##### std::transform_reduce
+Fuses a transformation (map) and reduction into a single pass. 
+
+```cpp
+#include <numeric>
+#include <vector>
+#include <execution>
+
+std::vector<double> weights = {0.5, 0.5};
+std::vector<double> returns = {0.02, 0.04};
+
+double port_return = std::transform_reduce(
+    std::execution::par_unseq,
+    weights.begin(), weights.end(),
+    returns.begin(),
+    0.0
+);
+```
+
+Instead of iterating through an array, mutating, storing into RAM, and then summing, `transform_reduce` loads the element and immediately adds to the local accumulator.
+
+Allows for Cache locality + bandwidth -> avoids intermediate allocations and round trips. Prevents L1/L2 cache evictions. It is the replacement for `inner_product()`.
+
+Replacing inner product:
+1) Transform (multiplication). Pairs 2 iterators and does the transformation. a0 * b0, a1 * b1, etc. This is parallelized. 
+2) Reduce. Do an out of order tree reduction similar to `std::reduce`. 
+
+##### std::inclusive_scan and std::exclusive_scan
+Parallel prefix sums.
+
+```cpp
+#include <numeric>
+#include <vector>
+#include <execution>
+
+std::vector<int> numbers = {10, 20, 30};
+std::vector<int> running_total(3);
+
+// outputs {10, 30, 60}
+std::inclusive_scan(std::execution::par_unseq, numbers.begin(), numbers.end(), running_total.begin()); 
+
+std::exclusive_scan(std::execution::par_unseq, numbers.begin(), numbers.end(), running_total.begin());
+```
+
+If you don't know this you don't deserve the degree. 
+
+#### Sorting and Selection Algorithms
+##### std::sort
+
+General purpose sort.
+
+```cpp 
+#include <algorithm>
+#include <vector>
+
+std::vector<double> latencies = {14.2, 11.1, 19.5, 12.0};
+
+std::sort(latencies.begin(), latencies.end());
+```
+
+Implemented via introsort. 
+1) Begins at quicksort.
+2) If the recursion depth exceeds 2 * log(n), it assumes quicksort will degrade towards O(n^2) and switches to heapsort.
+3) For small partitions (16 elements), it doesn't do recursion and does insertion sort because it has less overhead and it's only 16 elements. 
+
+This is done in place. 
+
+If you provide a custom comparator, it must return false for equal elements otherwise it will read out of bounds on seg faults. 
+
+This is because inside quicksort, the partition looks like this:
+
+```cpp
+while (comp(*ptr, pivot)) { ++ptr; }
+```
+If `comp` returns true for equal values and the whole array is the same element, pointer `ptr` will go through the memory and walk into unmapped memory pages causing seg faults. 
+
+##### std::stable_sort
+Maintains relative order of elements that compare as equivalent.
+
+```cpp
+#include <algorithm>
+#include <vector>
+
+struct item {
+    double price;
+    int time_ns;
+};
+
+// sort by the price and maintains chronological order
+std::vector<item> vec = {{32, 1}, {100, 3}, {100, 2}};
+std::stable_sort(vec.begin(), vec.end(), [](const item& a, const item& b) { return a.price < b.price; });
+```
+
+Implemented as adaptive merge sort. If system can allocate memory, it runs NlogN. If memory allocation fails, falls back to in-place merge sort O(Nlog^2N). That malloc is punishing. 
+
+##### std::partial_sort
+Sorts only the top k elements and leaves the remaining N - K elements in an unspecified state. 
+
+```cpp
+#include <algorithm>
+#include <vector>
+
+std::vector<double> volumes = {500, 100, 900, 300};
+
+// only sort the first 2 items but look at all the elements till end
+std::partial_sort(volumes.begin(), volumes.begin() + 2, volumes.end());
+```
+
+Key ideas:
+Sometimes `std::sort()` is better than `std::partial_sort` because heap operations jump around memory causing cache misses. Partial sort hurts when K is relatively large. 
+
+Better than just heapify + pop(k). Heapify() is O(N). Popping from the heap is O(K). Thus, O(n + klog(n)).
+
+In the standard implementation:
+1) Build heap on the k elements: O(K)
+2) Linear scan. Go through the remaining elements and look for smaller one.
+2.5) If element is smaller, swap with root and reheapify. O((N - K)log(K)). 
+3) Run `std::sort_heap()` on k elements which takes O(KlogK).
+
+Total complexity: O(K + (N - K)log(K))
+
+At the memory level: When you heapify with size N, it's much larger and if it spans cache blocks, it will miss. With K, it will be smaller so fewer cache misses. 
+
+Also, in terms of branch prediction, heapify(N) is K heap pops which will always cause pointer jumps. When you iterate through N-K elements, many of those evaluate to false and if branch predictor starts to assume false, it predicts correctly more often. 
+
+
+##### std::nth_element
+Finds the N-th element and partitions the array around it.
+
+```cpp
+#include <algorithm>
+#include <vector>
+
+std::vector<double> returns = {0.05, -0.01, 0.02, 0.1};
+auto median_it = returns.begin() + returns.size() / 2;
+
+// find the median
+std::nth_element(returns.begin(), median_it, returns.end());
+```
+
+Under the hood, this is implemented as Introselect (which is a hybrid of Quickselect and Median of Medians or Heapselect). 
+
+1) Partitions array around a pivot.
+2) Recurse only into the half that contains the Nth iterator (NlogN -> O(N)).
+
+This is the optimal way to find nth percentile value such as a median. If you use `std::sort`, it is NlogN vs O(N) answer. 
+
+However, while Nth element is perfect, the elements before/after are not sorted. 
+
+##### std::is_sorted / std::is_sorted_until
+Linear check to determine if array is already sorted. Very friendly for the branch predictor because most likely true in cases of network packets where it SHOULD be sorted. 
+
+```cpp
+#include <algorithm>
+#include <vector>
+
+std::vector<int> stream = {1, 0, 2, 3};
+bool sorted = std::is_sorted(stream.begin(), stream.end()); // false
+auto unsorted_it = std::is_sorted_until(stream.begin(), stream.end()); // returns 1
+```
+
+Will come back to these
+#### Binary Search Algorithms
+##### std::lower_bound
+##### std::upper_bound
+##### std::equal_range
+##### std:binary_search
+
+#### Partitioning Algorithms
+##### std:;partition
+##### std::stable_partition
+##### std::partition_point
+
+#### Heap Algorithms
+##### std::make_heap
+##### std::push_heap
+##### std::pop_heap
+##### std::sort_heap
+
+#### Sequence Modification
+##### std::transform
+##### std::views::transform
+##### std::remove/std::remove_if
+##### std::generate/std::generate_n
+##### std::replace/std::replace_if
+
+#### Non-Modifying Sequence Operations
+##### std::find, std::find_if, std::find_if_not
+##### std::anyof, std::all_of, std:: none_of
+##### std::mismatch
+
+#### Permutation and Merging
+##### std::next_permutation
+##### std::merge
+##### std::inplace_merge
