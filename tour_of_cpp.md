@@ -1035,3 +1035,74 @@ Will come back to these
 ##### std::next_permutation
 ##### std::merge
 ##### std::inplace_merge
+
+### std Library Utilities
+#### Smart Pointers and RAII (again)
+
+Manual memory management is dangerous.
+
+```cpp
+void f(int i, int j) {
+    X* p = new X;
+    std::unique_ptr<X> sp {new X};
+
+    // in both of these cases, p leaks because it is a raw pointer
+    if (i < 99) {
+        throw Z{};
+    }
+    if (j < 77) {
+        return;
+    }
+
+    p->function1();
+    p->function2();
+
+    delete p;
+}
+```
+
+`sp` is a `std::unique_ptr` on the stack and has its own `delete` call. It will not leak. `std::unique_ptr` is 0 cost because the compiler optimizes it with no memory overhead. It is literally just putting the pointer in a struct and the struct knows to delete itself.
+
+`std::shared_ptr` is different. `std::shared_ptr` is used when an object has non-deterministic, shared lifetime requirements. Use it when multiple parts of the system hold onto the object. For example, in a game engine, the audio thread, physics thread, and render thread hold a pointer to the player object. If rendering thread deletes the player, the physics thread will seg fault when it calculates collisions. With `std::shared_ptr`, the last thread to drop silently executes destruction. 
+
+It requires a dynamically allocated control block with the object. This block has:
+
+a) strong reference count - number of `std::shared_ptr` instances that own the data. As long as this is > 0, the managed object is kept in memory. 
+b) weak reference count - number of `std::weak_ptr` instances observing the data. These do not own the data. If this is > 0, it will not prevent object from being destroyed. To use the object, must convert to a `std::shared_ptr` using a lock. 
+Note: you have weak pointers in cases where A holds a `std::shared_ptr` to B and B holds one for A, strong counts are 1. If a program drops all counters, they keep each other alive which is a memory leak. The fix is to have B hold a `std::weak_ptr` to object A. 
+
+
+
+c) custom deleters/allocators
+
+During multithreading, incrementing/decrementing reference counts requires atomic operations. This causes cache line bouncing, memory bus traffic. With shared ownership, use `std::make_shared<T>()` which makes the allocation of object and control block into a contiguous heap block. This improves cache locality and reduces overhead. 
+
+#### Arrays, pointer decay, polymorphic problems
+
+```cpp
+void h() {
+    Circle a1[10]; 
+    std::array<Circle, 10> a2;
+
+    Shape* p1 = a1; // Point 1: this will compile because an array will decay to a pointer to its first element
+    Shape* p2 = a2; // fails to compile enforcing type safety. 
+    p1[3].draw();
+}
+```
+
+Problem with Point 1: Happens at `p1[3]`. From compiler POV, pointer arithmetic is determined by type of the pointer. It thinks `p1` is `Shape`. `p1[3]`'s address = Base + (3 x `sizeof(Shape)`). However, in `a1`, they're circles. If `sizeof(Circle) != sizeof(Shape)`, it will corrupt the bounds and cause segfault. 
+
+The solution is to use `std::array`. This is because `std::array<T, N>` does not decay. 
+
+#### Bit Manipulation via std::bitset
+`std::bitset<N>` is an abstraction over an array of integers. Ex: tracking 128 boolean states can be done via 
+```cpp
+bool flags[128]; // This is 128 bytes
+std::bitset<128> flags; // 16 bytes
+```
+
+Bitsets are more optimized and operations like `.count()` map directly to hardware instructions which execute in a single clock cycle. 
+
+Don't ever do `std::vector<bool>`.
+
+### Grouping Data: std::pair and std::tuple
