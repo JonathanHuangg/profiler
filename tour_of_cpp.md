@@ -1003,19 +1003,288 @@ auto unsorted_it = std::is_sorted_until(stream.begin(), stream.end()); // return
 
 Will come back to these
 #### Binary Search Algorithms
+
+
+All built on top of binary search. 
+
+Goal: standard library implementation of binary search to find the first iterator that is `>= value`. 
+
+This is only done because it must support all forward iterators like linkedlists. 
+```cpp
+while (count > 0) {
+    step = count / 2; // or step = count >> 1. get midpoint
+
+    // get to the middle
+    it = first; 
+    std::advance(it, step); // if this is a vector, jump. if ll, walk. 
+
+    if (*it < value) { // if this is 50% branch predictor will struggle
+        first = ++it; // discard the half
+        count -= step + 1; // shrink the number of elements by skipped
+    } else {
+        count = step; // it is on the left. shrink the window so it goes up to current iterator (left half)
+    }
+}
+```
 ##### std::lower_bound
+Returns iterator to first element that is `>= value`. 
+
 ##### std::upper_bound
+Returns iterator to the first element that is `> value`.
+Implementation is exactly the same except in the boolean condition.
+
+`if (value < *it)`
+
+Strict weak ordering - for any relation that represents `a < b`:
+
+1) `f(a, a)` must equal `false`. This means it cannot be `==` or `<=`. 
+
+If this is false, it guarantees that `*it` is `<=` to the target value. This means that this element and everything to the left is invalid. Upper bound must be to the right. 
 ##### std::equal_range
-##### std:binary_search
+Returns the range of iterators of all elements equal to value. Literally does `{std::lower_bound(), std::upper_bound()}`.
+
+This is further optimized where when you find the element equal to value, run `std::lower_bound` on left sub-segment and `std::upper_bound` on right sub-segment. 
+
+##### std::binary_search
+Return a bool indicating whether an element equivalent to value exists. 
+
 
 #### Partitioning Algorithms
-##### std:;partition
+Used for separating data without being Nlog(N).
+
+##### std::partition
+Rearranges elements so all elements where predicate returns true precede all elements for which it returns false. Does not preserve relative order. 
+
+Implemented via a bidirectional linear scan or in cases with only forward iterators, fast/slow pointers. 
+
+1) 2 pointers, one in beginning and one at end. 
+2) left pointer advances forward until it hits element where predicate is false
+3) right pointer advances backward until it hits true
+4) swap first and last elements
+5) repeat until the 2 pointers cross each other
+
+Runs in O(N) time and at most, N/2 swaps. Cache friendly because of the linear access pattern.
+
+```cpp
+template <class BidirectionalIterator, class Predicate>
+BidirectionalIterator partition_bidirectional(BidirectionalIterator first, BidirectionalIterator last, Predicate pred) {
+    while (true) {
+        // advance left pointer until failure
+        while (true) {
+            if (first == last) {
+                return first; // everything is true
+            }
+
+            if (!pred(*first)) {
+                break;
+            }
+
+            ++first;
+        }
+
+        // the do-while loop is very slightly faster because the right iterator may be out of bounds. so you start by decrementing last with do while and continue while it's true. 
+        do {
+            if (first == --last) {
+                return first;
+            }
+        } while (!pred(*last));
+
+        std::iter_swap(first, last);
+
+        ++first; // increment first because after swap, is definitely correct. last is decremented in the do while loop. 
+    }
+}
+```
+
+Using it to partition odd and even numbers. 
+```cpp
+#include <iostream>
+#include <vector>
+#include <algorithm>
+
+int main() {
+    std::vector<int> data = {1, 7, 4, 9, 2, 8, 3, 6, 5};
+
+    auto partition_point = std::partition(data.begin(), data.end(), [](int x){
+        return x % 2 == 0;
+    });
+
+    // from idx 0 -> partition point - 1, even numbers
+    // partition point -> end, odd numbers
+}
+```
 ##### std::stable_partition
+Same as `std::partition`, but guarantees relative order. The implementation changes depending on the memory state.
+
+1) Sufficient memory - `std::get_temporary_buffer()` to get a buffer equal to the size of the array. Then start a linear scan. If iterator is true, write directly into left side of original array. If false, write to temporary buffer. Then copy the buffer to the original array and free the buffer.
+
+```cpp
+template <class ForwardIt, class Predicate>
+ForwardIt stable_partition_buffer(ForwardIt first, ForwardIt last, Predicate pred, auto buffer_start) {
+    auto read_ptr = first;
+    auto write_true = first;
+    auto write_false = buffer_start; 
+
+    for (; read_ptr != last; ++read_ptr) {
+        if (pred(*read_ptr)) {
+            // write straight into the original memory only if the pointers are not equal.
+            // if the pointers are equal, all true so far so leave as is. 
+            if (read_ptr != write_true) {
+                *write_true = std::move(*read_ptr);
+            }
+
+            ++write_true;
+        } else {
+            // write into the buffer
+            *write_false = std::move(*read_ptr);
+            ++write_false; 
+        }
+    }
+
+    // move the false elements back into the original array
+    std::move(buffer_start, write_false, write_true);
+
+    return write_true; // return the partition point
+}
+
+
+```
+Note: when you use iterators, you are typically dereferencing and incrementing the iterator due to flexibility. You don't do something like `arr[i]` because that requires `operator[]` random access which something like a linkedlist doesn't have. Iterators are just glorified pointers. 
+
+```cpp 
+// typically you do this
+*it = data;
+++it;
+
+// or 
+*it++ = data;
+```
+
+2) Insufficient memory - in-place divide and conquer. Chop array into smaller chunks, partition them, then use `std::rotate` to swap true and false elements back and forth until merged. Rotate is also really bad on CPU cache as it requires swapping memory blocks. 
+
+I don't feel like doing the implementation for this. 
+
+Notes:
+
+Because of the `malloc()` in cases of sufficient memory, it *may* cause a global heap lock. Other cases, threads have thread-local caches (TLC) so the heap allocation is typically in the thread local arena. The lock only happens if there is heavy memory pressure or embedded system. 
 ##### std::partition_point
+Returns the iterator to the exact boundary line between the true elements and the false elements. The array MUST be already partitioned. This is literally just a binary search done with `std::lower_bound`. 
+
+As stated before, this causes cache misses for large arrays due to large jumps across memory. 
+
 
 #### Heap Algorithms
+Heaps are not based on nodes or pointers. They are implicit data structures mapped onto contiguous memory. 
+
+Any element index `i`:
+1) `left = 2i + 1`
+2) `right = 2i + 2`
+3) `parent = (i - 1)/2`
+
+By default, heaps are max heaps using `operator <`.
+
 ##### std::make_heap
+Converts an unsorted range into a valid max-heap. 
+
+Implemented via Floyd's algorithm. 
+1) Calculates index of the last non-leaf node: `(N / 2) - 1`. Elements after this index are leaves and single leaves are valid heaps. 
+2) Iterate backward from index to 0.
+3) from node, do a `down_heap()`. The optimized version is called `sift_down()`;
+
+```cpp
+
+/*
+Compare left and right child to find the larger one. Essentially swap that child ptr with the hole. Do this while hole hits the very bottom leaf later.
+*/
+
+// note: holes are just an empty slot in the array for holding variables. 
+// RandomIt is random access iterator
+// ptrdiff_t stores the difference between 2 pointers/iterators
+template<class RandomIt>
+void sift_down(RandomIt first, ptrdiff_t hole, ptrdiff_t len, auto value) {
+    ptrdiff_t top = hole;
+    ptrdiff_t child = 2 * hole + 1; 
+
+    while (child < len) {
+        
+        // first points to beginning of sequence. child is the integer offset. to get data, do first + offset. 
+        // child + 1 < len -> checks if the child exist (len is the boundary of real vs garbage data)
+        // *(first + child) < *(first + (child + 1)) -> if right value is > left value
+        if (child + 1 < len && *(first + child) < *(first + (child + 1))) {
+            ++child; // point to the bigger and in this case right child
+        }
+
+        // move larger child up
+        *(first + hole) = std::move(*(first + child));
+
+        // the hole becomes the old child as the child and hole basically swap
+        hole = child;
+        child = 2*hole + 1; 
+    }
+
+    sift_up(first, hole, top, std::move(value));
+}
+
+/*
+sift_up is basically push_heap. Take a value at the bottom of the heap and bubble it upward to its correct resting place. 
+*/
+template <class RandomIt>
+void sift_up(RandomIt first, ptrdiff_t hole, ptrdiff_t top, auto value) {
+    while (hole > top) {
+        ptrdiff_t parent = (hole - 1) / 2; 
+        if (*(first + parent) < value) {
+            *(first + hole) = std::move(*(first + parent));
+            hole = parent;
+        } else {
+            break; 
+        }
+    }
+
+    *(first + hole) = std::move(value); // move the value back into the hole. 
+}
+
+template <class RandomIt>
+void make_heap(RandomIt first, RandomIt last) {
+    ptrdiff_t len = last - first; // total number of elements in the array
+    if (len < 2) {
+        return;
+    }
+
+    // get last non-leaf node
+    ptrdiff_t parent = (len - 2) / 2;
+
+    // take out the parent, sift_down to its correct place. (aka downheap)
+    while (true) {
+        auto val = std::move(*(first + parent));
+        sift_down(first, parent, len, std::move(val));
+        if (parent == 0) {
+            break;
+        }
+        --parent; // process the next value.
+    }
+}
+
+```
 ##### std::push_heap
+Already a valid heap. the item to push up is already there sitting at last - 1. It's typically placed there via `std::vector::push_back`.
+
+```cpp
+template <class RandomIt>
+void push_heap(RandomIt first, RandomIt last) {
+    ptrdiff_t hole = (last - first) - 1; // new added element in the end
+    ptrdiff_t parent = (hole - 1) / 2;
+    auto val = std::move(*(first + hole)); // take the placed value and store into this temp variable. this means that *(first + hole) data can be manipulated. 
+
+    // push that new value up to where it should be
+    while (hole > 0 && *(first + parent) < val) {
+        *(first + hole) = std::move(*(first + parent)); // data from parent is put into the hole
+        hole = parent; // space where the parent is is now empty. it's the new hole
+        parent = (hole - 1) / 2; // new parent for next iteration
+    }
+    *(first + hole) = std::move(val); // drop the value into the hole
+}
+```
+
 ##### std::pop_heap
 ##### std::sort_heap
 
@@ -1070,8 +1339,6 @@ It requires a dynamically allocated control block with the object. This block ha
 a) strong reference count - number of `std::shared_ptr` instances that own the data. As long as this is > 0, the managed object is kept in memory. 
 b) weak reference count - number of `std::weak_ptr` instances observing the data. These do not own the data. If this is > 0, it will not prevent object from being destroyed. To use the object, must convert to a `std::shared_ptr` using a lock. 
 Note: you have weak pointers in cases where A holds a `std::shared_ptr` to B and B holds one for A, strong counts are 1. If a program drops all counters, they keep each other alive which is a memory leak. The fix is to have B hold a `std::weak_ptr` to object A. 
-
-
 
 c) custom deleters/allocators
 
