@@ -1183,6 +1183,29 @@ Any element index `i`:
 
 By default, heaps are max heaps using `operator <`.
 
+**Key Point:** Not using `std::swap`.
+
+`std::swap` requires a temporary register with 3 memory writes:
+```cpp
+tmp = std::move(A);
+A = std::move(B);
+B = std::move(tmp);
+```
+
+**Solution:** "Hole" optimization. If you are going to move the element multiple times, don't keep putting the item back in the list until you know where it logically should go.
+
+```cpp
+auto val = std::move(array[0]);        // 1) array[0] is now a "hole".
+array[hole] = std::move(array[child]); // 2) Every sift, you are pulling into this hole. Every element move is a write into the hole.
+array[final_hole] = std::move(val);    // 3) When the hole is in the right place, write the value back into the hole.
+```
+
+Given something like `[A, B, C, D]`:
+
+The hole can first hold `A`, then hold `B`, then `C`. Then perhaps it stops at `C` and you replace `C` with something else.
+
+* `std::swap` writes = `3k` (where `k` is a memory step in the heap).
+* Using hole = `k + 2` writes.
 ##### std::make_heap
 Converts an unsorted range into a valid max-heap. 
 
@@ -1286,15 +1309,261 @@ void push_heap(RandomIt first, RandomIt last) {
 ```
 
 ##### std::pop_heap
+The max element (normally at the front) swaps places with the last element. Then you sift down that element.
+
+```cpp
+template <class RandomIt>
+void pop_heap(RandomIt first, RandomIt last) {
+    if (last - first > 1) {
+        --last;
+
+        // Without std::move, you would call the copy constructor.
+        // If each item was a string, it would require malloc() and heap copying. Move just steals the pointers because it tells them that you will fill in *last anyway.
+        auto bottom_val = std::move(*last);
+
+        *last = std::move(*first);
+        
+        ptrdiff_t len = last - first;
+
+        // Sift down the hole and then drop bottom val in.
+        sift_down(first, 0, len, std::move(bottom_val));
+    }
+}
+```
 ##### std::sort_heap
+Converts a max-heap into a fully sorted array in ascending order.
+
+You literally just loop `std::pop_heap` because `std::pop_heap` takes the largest element and puts it at the end of the array. Runs in O(N log N).
+```cpp
+template <class RandomIt>
+void sort_heap(RandomIt first, RandomIt last) {
+    while (last - first > 1) {
+        --last;
+        std::pop_heap(first, last + 1);
+    }
+}
+```
 
 #### Sequence Modification
-##### std::transform
-##### std::views::transform
-##### std::remove/std::remove_if
-##### std::generate/std::generate_n
-##### std::replace/std::replace_if
+Focus on the difference between memory-bound operations (eager evaluation) and CPU-bound operations (lazy evaluation). 
 
+##### std::transform
+Applies a function to every element in a range and writes to a destination range (ranges can be the same so it can be in-place). This is typically implemented as a linear loop.
+```cpp
+template <class InputIt, class OutputIt, class UnaryOperation>
+OutputIt transform(InputIt first1, InputIt last1, OutputIt d_first, UnaryOperation unary_op) {
+    while (first1 != last1) {
+        *d_first++ = unary_op(*first1++);
+    }
+    return d_first; 
+}
+```
+
+Using `std::transform`:
+```cpp
+#include <algorithm>
+#include <vector>
+#include <cmath>
+
+std::vector<double> prices = {100.0, 105.0, 102.0};
+std::vector<double> log_prices(prices.size()); // make sure it is pre allocated
+
+std::transform(prices.begin(), prices.end(), log_prices.begin(), [](double p) {return std::log(p);});
+```
+
+Great for compiler auto-vectorization. In simple cases of unary_op, the loop can be unrolled and use AVX registers to process 8 or 16 elements per clock cycle. 
+
+Quick refresher on loop unrolling:
+```cpp
+for (int i = 0; i < 1000; ++i) {
+    sum += a[i] * b[i];
+}
+```
+
+At the basic level:
+1) load `a[i]`, `b[i]`, multiply, add to `sum`
+2) increment `i`
+3) compare `i` to 1000
+4) if true, back to the top of the loop
+
+Steps 2, 3, and 4 are loop overhead. If they run over and over, half of the clock cycles are spent managing the loop counter rather than the actual computation. To lower this, the compiler can do something like this to be more efficient:
+
+```cpp
+int i = 0;
+
+for (; i <= 1000 - 4; i += 4) {
+    sum += a[i] + b[i];
+    sum += a[i + 1] + b[i + 1];
+    sum += a[i + 2] + b[i + 2];
+    sum += a[i + 3] + b[i + 3];
+}
+
+// handle remainders
+for (; i < 1000; ++i) {
+    sum += a[i] * b[i];
+}
+```
+Thus, the number of branches goes from 1K to 250. For instruction-level parallelism, out-of-order execution means that multiple ALUs can function independently. 
+**Trap:** If `d_first` overlaps with `first1` in any way that isn't in-place, the SIMD write might overwrite data, so the function silently won't vectorize. 
+
+##### std::views::transform
+The modern way of std::transform. Instead of eagerly computing results and writing, create a lazy view. 
+
+a) It does not allocate memory.
+b) It does not iterate over the created array.
+
+Instead, construct an iterator wrapper with a pointer to underlying data and copy of the lambda. Transformation only happens when the iterator is dereferenced. 
+
+```cpp
+// kinda what the assembly looks like
+decltype(auto) operator*() const {
+    return unary_op(*underlying_iterator);
+}
+```
+
+In other words. It only becomes the transform after you iterate over it. 
+
+Example of use:
+```cpp
+#include <ranges>
+#include <vector>
+#include <iostream>
+
+std::vector<double> prices = {100.0, 105.0, 102.0};
+
+auto lazy_prices_in_log = prices | std::views::transform([](double p) {return std::log(p);});
+
+// every read is the log version of the price
+for (auto log_p : lazy_prices_in_log) {
+    /* ... */
+}
+```
+
+When is `std::views::transform` better compared to `std::transform`?
+1) Single passes over memory-bound operations -> if you are iterating over the data once and the array is giant, `std::transform` will cause memory problems with buffer allocations and cause cache misses. Lazy views keeps all data inside the L1 cache.
+2) Early exits -> finding the first transformed element that meets a condition, you don't need to precompute and save the rest of the elements. 
+3) Chaining operations:
+```cpp
+data | std::views::filter | std::views::transform | std::views::take(10)
+```
+
+When is `std::transform` better than `std::views::transform`?
+1) Multiple passes -> you don't want to run the computation multiple times.
+2) If you have older libraries that can't use C++20.
+3) Guaranteed SIMD Vectorization.
+
+
+##### std::remove/std::remove_if
+Removes the elements that match a value or predicate. Does not change the size of the container. 
+
+2 pointer approach. 
+1) read and write ptr
+2) u know the rest
+```cpp
+template<class ForwardIt, class UnaryPredicate> 
+// first is the read_ptr
+ForwardIt remove_if(ForwardIt first, ForwardIt last, UnaryPredicate p) {
+    ForwardIt write_ptr = first; 
+    for (; first != last; ++first) {
+        if (!p(*first)) { // if it should be removed
+            // only write in if they are not the same anymore
+            if (first != write_ptr) {
+                *write_ptr = std::move(*first);
+            }
+            ++write_ptr; 
+        }
+    }
+    return write_ptr; 
+}
+```
+
+Because you return the iterator that is the number of good items + 1, you can easily combine this with `std::erase()` to reclaim memory.
+```cpp
+// C++17 and older
+vec.erase(std::remove_if(vec.begin(), vec.end(), is_expired), vec.end());
+
+// C++20 and newer
+std::erase_if(vec, is_expired);
+```
+##### std::generate/std::generate_n
+A generator is a function or lambda that takes no arguments and returns a value. 
+
+```cpp
+[]() {return 5;}
+[]() {return get_system_time();}
+```
+
+std::generate calls the 0 argument function over and over, taking the return value, and putting it into an array.
+
+Suppose you have an std::vector with 5 slots you want to fill
+```cpp
+
+// old C way
+std::vector<int> vec(5);
+for (size_t i = 0; i < vec.size(); ++i) {
+    vec[i] = 42; 
+}
+
+// modern way
+std::vector<int> vec(5);
+std::generate(vec.begin(), vec.end(), [](){return 42;});
+```
+
+Now turn to stateful generators - when the generator remembers what it did last time. You can generate an ascending sequence with a lambda by providing a reference or using the mutable keyword. 
+
+```cpp
+std::vector<int> vec(5);
+int counter = 10; 
+
+std::generate(vec.begin(), vec.end(), [&counter]() {
+    int current = counter;
+    counter++;
+    return current; 
+});
+```
+
+`std::generate_n` fills exactly `n` slots. Calling `std::generate` on an empty array does nothing because it requires a `vec.begin()` and a `vec.end()`. 
+
+
+```cpp
+std::vector<int> vec(10, 0); // 10 slots with value = 0 
+int counter = 1;
+
+std::generate_n(vec.begin(), 3, [&counter]() {
+    return counter++;
+}); // vec is now [1, 2, 3, 0, ...]
+
+// you can also grow the vector by combining std::generate_n with std::back_inserter
+
+std::vector<int> empty_vec;
+counter = 100;
+
+std::generate_n(std::back_inserter(empty_vec), 4, [&counter]() {
+    return counter++;
+}); // empty_vec is now [100, 101, 102, 103]
+```
+##### std::replace/std::replace_if
+Scans a sequence and replaces elements that match the value with a new value. 
+
+```cpp
+template<class ForwardIt, class UnaryPredicate, class T>
+void replace_if(ForwardIt first, ForwardIt last, UnaryPredicate p, const T& new_value) {
+    for (; first != last; ++first) {
+        if (p(*first)) {
+            *first = new_value;
+        }
+    }
+}
+```
+
+If needed, sometimes you can just write a branchless loop:
+
+```cpp
+for (auto& val : data) {
+    bool mask = p(val);
+    val = mask * new_value + (!mask) * val;
+}
+```
 #### Non-Modifying Sequence Operations
 ##### std::find, std::find_if, std::find_if_not
 ##### std::anyof, std::all_of, std:: none_of
@@ -1373,3 +1642,10 @@ Bitsets are more optimized and operations like `.count()` map directly to hardwa
 Don't ever do `std::vector<bool>`.
 
 ### Grouping Data: std::pair and std::tuple
+
+## Concurrency
+### std::thread and .join()
+### std::defer_lock and mutexes
+### Asynchronous State with std::promise and std::future
+### std::packaged_task
+### std::async

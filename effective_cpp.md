@@ -112,7 +112,7 @@ The compiler first sets it to `std::initializer_list<int>` and then looks inside
 
 ---
 
-## 3) Decltype - compile time inspector tool
+    ## 3) Decltype - compile time inspector tool
 
 **Example:**
 ```cpp
