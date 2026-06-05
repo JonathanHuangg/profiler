@@ -1645,7 +1645,135 @@ Don't ever do `std::vector<bool>`.
 
 ## Concurrency
 ### std::thread and .join()
+Single thread at the OS level. You pass 1) a callable (function pointer, lambada, functor) and its arguments into the constructor.
+```cpp
+void worker(int& x, int y) {
+    x += y;
+}
+
+int main() {
+    int val = 0;
+    std::thread t(worker, std::ref(val), 10);
+    t.join();
+}
+```
+
+std::thread is not a template class. It relies on type erasure and heap allocation. 
+
+1) 
+If std::thread were a template class like template <typename F, typename... aArgs> class thread, every thread object with different function signature would be a distinct type. Thus, you can't store the into a container like std::vector<std::thread>.
+```cpp
+template<class Function, class... Args>
+explicit thread(Function&& f, Args&&... args);
+```
+Because it is concrete and non-templated, the memory layout is fixed at compiled time. However, its constructor is templated to accept anything callable (free functions, class functiosn, functors, lambda). If std::thread did not use a generic tempalted constructor, you can't pass lambdas because std::thread can't know the type of lambdas in advance since lambdas are created at compile time. 
+
+```cpp
+// Type Erasure Implementation
+
+// this is the erased interface. Not templated. Pointer to this class is always the same size regardless of function. 
+struct ThreadStateBase {
+    virtual ~ThreadStateBase() = default;
+    virtual void run() = 0;
+};
+
+// concrete implementation. Captures the lambda F and arguments. 
+template <typename F, typename... Args>
+struct ThreadStateImpl : public ThreadStateBase {
+
+    std::decay_t<F> func;
+    std::tuple<std::decay_t<Args>...> args;
+
+    ThreadStateImpl(F&& f, Args**... a)
+        : func(std::forward<F>(f)),
+        args(std::forward<Args>(a)... ) {}
+    
+    void run() override {
+        std::apply(func, args);
+    }
+}
+```
+2) For Heap Allocation, pthread_create() are C apis and don't understand C++ templates, classes, or objects. 
+
+The base C signature is void* (*start_routine)(void*). Void* is a memory address with no type information. The C signature wants
+1) void* (*start_routine) -> base function pointer to your function casted to a void
+2) (void*) as arugment -> to pass data, pack all arguments into memory and give OS the raw address
+
+Since with templates, structs like ThreadStateImpl contain arbitrary amount of dta based on arguments, the size is allocated on heap. 
+
+```cpp
+//how the std::thread constructor interacts with the OS
+extern "C" void* thread_proxy(void* ptr) {
+
+    // cast the void pointer back into the class
+    std::unique_ptr<ThreadStateBase> state(static_cast<ThreadStateBase*>(ptr));
+
+    state.run();
+
+    return nullptr;
+}
+
+// the std::thread templated constructor that runs in thep arent thread. 
+template <typename F, typename... Args>
+thread::thread(F&& f, Args&&... args) {
+    auto* state = new ThreadStateImpl<F, Args...>(
+        std::forward<F>(f),
+        std::forward<Args>(args)...
+    );
+
+    int err = pthread_create(&this->handle, nullptr, &thread_proxy, state);
+
+    if (err) {
+        delete state;
+        throw std::system_error(/* ... */);
+    }
+}
+```
+Data flow for thread creation:
+1) You write something like std::Thread(my_lambda, 42);
+2) std::thread looks at the lambda and arguments, creates a ThreadStateImpl on the heap to store them.
+3) std::thread now has a pointer to the heap. Treat it like a ThreadStateBase*.
+4) Now talk to the OS (which works in C). It needs to cast ThreadStateBase* into a void*. 
+5) std::thread tells the OS: "Start a new thread, run the C function, pass it this void*"
+6) Inside the new thread, the C function runs
+7) C function casts the void* into a ThreadSateBace
+8) C function calls ->run(), virtual dispatch routes the execution into ThreadStateImpl
+9) ThreadStateImpl unpacks the tuple and executes my_lambda(42)
+
+
 ### std::defer_lock and mutexes
+defer_lock is a tag struct. Used for function and constructor overload to tell std::unique_lock not to acquire lock on construction. 
+
+Used when you need to lock multiple mutexes simultaneously without deadlock. 
+
+```cpp
+std::mutex m1, m2;
+
+void thread_safe_swap() {
+
+    // construct the locks but do not lock them yet
+    std::unique_lock<std::mutex> lock1(m1, std::defer_lock);
+    std::unique_lock<std::mutex> lock2(m2, std::defer_lock);
+    
+    // lock simultenously
+    std::lock(lock1, lock2);
+}
+```
 ### Asynchronous State with std::promise and std::future
+std::promise and std::Future are paried endpoints of a one time communication channel. Promise is the push end. Future is the pull end.
+```cpp
+std::promise<int> prom;
+std::future<int> fut = prom.get_future();
+
+/*
+when std::promise::set_value is called, it locks the mutex, writes the value, and flags the state as ready, and fires the condition variabl.e 
+*/
+std::thread t([&prom]() {
+    prom.set_value(42);
+});
+
+int result = fut.get();
+t.join();
+```
 ### std::packaged_task
 ### std::async
