@@ -231,6 +231,9 @@ class SinglyLinkedList_norm {
             ++list_size;
         }
 
+        std::size_t size() const { return list_size; }
+        bool empty() const { return list_size == 0; }
+
         std::string read_list() {
             std::stringstream ss;
             Node* probe = head;
@@ -254,6 +257,10 @@ class CircularlyLinkedList {
         CircularlyLinkedList() = default;
 };
 
+// The test suite below is the standalone program: `g++ linked_lists.cpp`.
+// The benchmark (main.cpp) includes this file to time the lists, and
+// defines PROFILER_BENCH so this main() is left out of that build.
+#ifndef PROFILER_BENCH
 int main() {
 
     std::cout << "LINKEDLIST TEST SUITE \n \n";
@@ -288,3 +295,4 @@ int main() {
 
     std::cout << "Basic Correctness Check for STL forward_list: " << forward_list_ss.str() << "\n\n";
 }
+#endif  // PROFILER_BENCH
