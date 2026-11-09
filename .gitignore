@@ -2,3 +2,10 @@ sample_questions.md
 questions 
 more_questions
 
+
+.DS_Store
+
+# build outputs
+/profiler
+/linked_list
+*.csv
